@@ -1,16 +1,3 @@
----
-# Cartouche v1
-title: "swift-holons — Swift SDK for Organic Programming"
-author:
-  name: "B. ALTER"
-created: 2026-02-12
-revised: 2026-02-13
-lang: en-US
-access:
-  humans: true
-  agents: false
-status: draft
----
 # swift-holons
 
 **Swift SDK for Organic Programming** — transport URI parsing, serve flag parsing,
