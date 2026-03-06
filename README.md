@@ -14,7 +14,7 @@ status: draft
 # swift-holons
 
 **Swift SDK for Organic Programming** — transport URI parsing, serve flag parsing,
-HOLON.md identity parsing, and Holon-RPC client support.
+holon.yaml identity parsing, and Holon-RPC client support.
 
 ## Features
 
@@ -31,7 +31,7 @@ HOLON.md identity parsing, and Holon-RPC client support.
   - `stdio://` (single accepted stdio connection)
   - `mem://` (in-process full-duplex dial/accept pair)
 - Standard CLI flag parsing (`--listen`, `--port`)
-- HOLON.md frontmatter parser
+- holon.yaml parser
 - Holon-RPC client (`holon-rpc` subprotocol, JSON-RPC 2.0, heartbeat, reconnect)
 
 ## Package
