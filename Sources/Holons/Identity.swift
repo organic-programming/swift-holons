@@ -17,6 +17,22 @@ public struct HolonIdentity: Equatable {
     public var aliases: [String] = []
 
     public init() {}
+
+    public var slug: String {
+        let given = givenName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let family = familyName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\?$"#, with: "", options: .regularExpression)
+        if given.isEmpty && family.isEmpty {
+            return ""
+        }
+
+        let joined = "\(given)-\(family)"
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+        return joined.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
 }
 
 public enum IdentityError: Error, CustomStringConvertible {

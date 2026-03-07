@@ -63,6 +63,84 @@ final class HolonsTests: XCTestCase {
         XCTAssertEqual(id.lang, "swift")
         XCTAssertEqual(id.parents, ["a", "b"])
         XCTAssertEqual(id.aliases, ["s1"])
+        XCTAssertEqual(id.slug, "swift-holon")
+    }
+
+    func testDiscoverRecursesSkipsAndDedups() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holons_discover_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try writeHolon(at: root, relativeDir: "holons/alpha", seed: HolonSeed(
+            uuid: "uuid-alpha",
+            givenName: "Alpha",
+            familyName: "Go",
+            binary: "alpha-go"
+        ))
+        try writeHolon(at: root, relativeDir: "nested/beta", seed: HolonSeed(
+            uuid: "uuid-beta",
+            givenName: "Beta",
+            familyName: "Rust",
+            binary: "beta-rust"
+        ))
+        try writeHolon(at: root, relativeDir: "nested/dup/alpha", seed: HolonSeed(
+            uuid: "uuid-alpha",
+            givenName: "Alpha",
+            familyName: "Go",
+            binary: "alpha-go"
+        ))
+        for skipped in [".git/hidden", ".op/hidden", "node_modules/hidden", "vendor/hidden", "build/hidden", ".cache/hidden"] {
+            try writeHolon(at: root, relativeDir: skipped, seed: HolonSeed(
+                uuid: "ignored-uuid",
+                givenName: "Ignored",
+                familyName: "Holon",
+                binary: "ignored-holon"
+            ))
+        }
+
+        let entries = try discover(root: root)
+        XCTAssertEqual(entries.count, 2)
+
+        let alpha = try XCTUnwrap(entries.first(where: { $0.uuid == "uuid-alpha" }))
+        XCTAssertEqual(alpha.slug, "alpha-go")
+        XCTAssertEqual(alpha.relativePath, "holons/alpha")
+        XCTAssertEqual(alpha.manifest?.build.runner, "go-module")
+
+        let beta = try XCTUnwrap(entries.first(where: { $0.uuid == "uuid-beta" }))
+        XCTAssertEqual(beta.relativePath, "nested/beta")
+    }
+
+    func testDiscoverLocalAndFindHelpers() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holons_find_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try writeHolon(at: root, relativeDir: "rob-go", seed: HolonSeed(
+            uuid: "c7f3a1b2-1111-1111-1111-111111111111",
+            givenName: "Rob",
+            familyName: "Go",
+            binary: "rob-go"
+        ))
+
+        let original = FileManager.default.currentDirectoryPath
+        defer {
+            XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(original))
+        }
+        XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(root.path))
+
+        let local = try discoverLocal()
+        XCTAssertEqual(local.count, 1)
+        XCTAssertEqual(local.first?.slug, "rob-go")
+
+        let bySlug = try findBySlug("rob-go")
+        XCTAssertEqual(bySlug?.uuid, "c7f3a1b2-1111-1111-1111-111111111111")
+
+        let byUUID = try findByUUID("c7f3a1b2")
+        XCTAssertEqual(byUUID?.slug, "rob-go")
+
+        XCTAssertNil(try findBySlug("missing"))
     }
 
     func testRuntimeTCPRoundTrip() throws {
@@ -174,6 +252,45 @@ final class HolonsTests: XCTestCase {
             XCTAssertFalse(reason.isEmpty)
         }
     }
+}
+
+private struct HolonSeed {
+    let uuid: String
+    let givenName: String
+    let familyName: String
+    let binary: String
+}
+
+private func writeHolon(at root: URL, relativeDir: String, seed: HolonSeed) throws {
+    let dir = relativeDir
+        .split(separator: "/")
+        .reduce(root) { partial, component in
+            partial.appendingPathComponent(String(component), isDirectory: true)
+        }
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    let content = """
+    schema: holon/v0
+    uuid: "\(seed.uuid)"
+    given_name: "\(seed.givenName)"
+    family_name: "\(seed.familyName)"
+    motto: "Test"
+    composer: "test"
+    clade: deterministic/pure
+    status: draft
+    born: "2026-03-07"
+    generated_by: test
+    kind: native
+    build:
+      runner: go-module
+    artifacts:
+      binary: \(seed.binary)
+    """
+    try content.write(
+        to: dir.appendingPathComponent("holon.yaml"),
+        atomically: true,
+        encoding: .utf8
+    )
 }
 
 private enum TestConnectionError: Error {
