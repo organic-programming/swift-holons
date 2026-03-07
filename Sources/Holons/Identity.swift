@@ -20,15 +20,12 @@ public struct HolonIdentity: Equatable {
 }
 
 public enum IdentityError: Error, CustomStringConvertible {
-    case missingFrontmatter(String)
-    case unterminatedFrontmatter(String)
+    case invalidMapping(String)
 
     public var description: String {
         switch self {
-        case let .missingFrontmatter(path):
-            return "\(path): missing YAML frontmatter"
-        case let .unterminatedFrontmatter(path):
-            return "\(path): unterminated YAML frontmatter"
+        case let .invalidMapping(path):
+            return "\(path): holon.yaml must be a YAML mapping"
         }
     }
 }
@@ -36,26 +33,18 @@ public enum IdentityError: Error, CustomStringConvertible {
 public enum Identity {
     public static func parseHolon(_ path: String) throws -> HolonIdentity {
         let text = try String(contentsOfFile: path, encoding: .utf8)
-
-        guard text.hasPrefix("---") else {
-            throw IdentityError.missingFrontmatter(path)
-        }
-
-        guard let end = text.range(of: "---", options: [], range: text.index(text.startIndex, offsetBy: 3)..<text.endIndex) else {
-            throw IdentityError.unterminatedFrontmatter(path)
-        }
-
-        let frontmatter = text[text.index(text.startIndex, offsetBy: 3)..<end.lowerBound]
-        return parseFrontmatter(String(frontmatter))
+        return try parseYAML(text, path: path)
     }
 
-    private static func parseFrontmatter(_ content: String) -> HolonIdentity {
+    private static func parseYAML(_ content: String, path: String) throws -> HolonIdentity {
         var identity = HolonIdentity()
+        var sawMapping = false
 
         for rawLine in content.split(separator: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty, !line.hasPrefix("#") else { continue }
             guard let idx = line.firstIndex(of: ":") else { continue }
+            sawMapping = true
 
             let key = String(line[..<idx]).trimmingCharacters(in: .whitespaces)
             var value = String(line[line.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
@@ -84,6 +73,9 @@ public enum Identity {
             }
         }
 
+        guard sawMapping else {
+            throw IdentityError.invalidMapping(path)
+        }
         return identity
     }
 

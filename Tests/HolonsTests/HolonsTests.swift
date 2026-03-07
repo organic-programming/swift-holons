@@ -45,16 +45,13 @@ final class HolonsTests: XCTestCase {
 
     func testIdentityParse() throws {
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("holons_test_\(UUID().uuidString).md")
+            .appendingPathComponent("holons_test_\(UUID().uuidString).yaml")
         let content = """
-        ---
         uuid: \"abc-123\"
         given_name: \"swift-holon\"
         lang: \"swift\"
         parents: [\"a\", \"b\"]
         aliases: [\"s1\"]
-        ---
-        # Swift Holon
         """
 
         try content.write(to: tmp, atomically: true, encoding: .utf8)

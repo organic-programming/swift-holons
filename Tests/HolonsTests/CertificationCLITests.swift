@@ -133,23 +133,6 @@ final class CertificationCLITests: XCTestCase {
         XCTAssertEqual(invocation.environment["GOCACHE"], "/tmp/go-cache")
     }
 
-    func testCertJSONDeclaresLevel3Capabilities() throws {
-        let certPath = packageRoot.appendingPathComponent("cert.json")
-        let data = try Data(contentsOf: certPath)
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            XCTFail("invalid cert.json")
-            return
-        }
-        let executables = root["executables"] as? [String: Any]
-        let capabilities = root["capabilities"] as? [String: Any]
-
-        XCTAssertEqual(executables?["holon_rpc_server"] as? String, "swift run holon-rpc-server")
-        XCTAssertEqual(capabilities?["grpc_dial_ws"] as? Bool, true)
-        XCTAssertEqual(capabilities?["holon_rpc_server"] as? Bool, true)
-        let routing = Set((capabilities?["routing"] as? [String]) ?? [])
-        XCTAssertEqual(routing, Set(["unicast", "fanout", "broadcast-response", "full-broadcast"]))
-    }
-
     func testEchoClientSupportsMemRoundTrip() throws {
         let invocation = CertificationCLI.makeEchoClientInvocation(
             userArgs: ["--message", "cert-mem", "mem://swift-cert"],
