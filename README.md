@@ -1,31 +1,24 @@
 # swift-holons
 
-**Swift SDK for Organic Programming** — transport URI parsing, serve flag parsing,
-holon.yaml identity parsing, and Holon-RPC client support.
-
-## Features
-
-- Transport URI surface:
-  - `tcp://`
-  - `unix://`
-  - `stdio://`
-  - `mem://`
-  - `ws://`
-  - `wss://`
-- Native runtime listeners:
-  - `tcp://` (socket bind + accept)
-  - `unix://` (domain socket bind + accept)
-  - `stdio://` (single accepted stdio connection)
-  - `mem://` (in-process full-duplex dial/accept pair)
-- Standard CLI flag parsing (`--listen`, `--port`)
-- holon.yaml parser
-- Holon-RPC client (`holon-rpc` subprotocol, JSON-RPC 2.0, heartbeat, reconnect)
+**Swift SDK for Organic Programming** — transport primitives,
+serve-flag parsing, `holon.yaml` parsing, filesystem discovery, and a
+Holon-RPC client for Swift holons.
 
 ## Package
 
 ```swift
 .package(path: "../swift-holons")
 ```
+
+## Features
+
+- Runtime transports: `tcp://`, `unix://`, `stdio://`, `mem://`
+- Transport metadata for `ws://` and `wss://`
+- Standard CLI flag parsing (`--listen`, `--port`)
+- `Identity.parseHolon(_:)`
+- `discover(root:)`, `discoverLocal()`, `discoverAll()`
+- `findBySlug(_:)`, `findByUUID(_:)`
+- `HolonRPCClient.connect/invoke/register/close`
 
 ## API
 
@@ -37,30 +30,20 @@ holon.yaml identity parsing, and Holon-RPC client support.
 - `RuntimeListener.accept()`
 - `RuntimeListener.close()`
 - `MemRuntimeListener.dial()`
-- `HolonRPCClient.connect/invoke/register/close`
 - `Serve.parseFlags(_:)`
 - `Identity.parseHolon(_:)`
+- `discover(root:)`
+- `discoverLocal()`
+- `discoverAll()`
+- `findBySlug(_:)`
+- `findByUUID(_:)`
+- `HolonRPCClient`
 
-## Parity Notes vs Go Reference
+## Current gaps vs Go
 
-Implemented parity:
-
-- URI parsing and listener dispatch semantics
-- Runtime transport primitives for `tcp`, `unix`, `stdio`, `mem`
-- Holon-RPC client protocol support over `ws://` / `wss://`
-- Standard serve flag parsing
-- HOLON identity parsing
-
-Not yet achievable with the current Swift stack (justified gaps):
-
-- `ws://` / `wss://` runtime listener parity:
-  - The Go SDK uses `net.Listener` over upgraded WebSocket streams for gRPC.
-  - `grpc-swift` does not provide an official WebSocket server transport for HTTP/2 gRPC framing.
-  - `Transport.listenRuntime(_:)` therefore throws `TransportError.runtimeUnsupported` for `ws/wss`.
-- Transport-agnostic gRPC client helpers (`Dial`, `DialStdio`, `DialMem`, `DialWebSocket`):
-  - Go can expose a generic `grpc.ClientConn` factory across schemes.
-  - Swift gRPC clients are channel- and event-loop-driven and need scheme-specific channel construction.
-  - A faithful helper layer requires a dedicated grpc-swift integration module that is not yet present in this SDK.
+- No generic `connect()` helper yet.
+- `ws://` and `wss://` do not provide a runtime gRPC listener.
+- The SDK does not yet expose a transport-agnostic gRPC channel factory.
 
 ## Test
 
