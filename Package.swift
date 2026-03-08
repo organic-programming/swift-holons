@@ -28,6 +28,7 @@ let package = Package(
         .package(url: "https://github.com/grpc/grpc-swift.git", exact: "1.9.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.36.0"),
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.35.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
     ],
     targets: [
         .target(
@@ -37,6 +38,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+                .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .executableTarget(
