@@ -814,7 +814,7 @@ public enum Transport {
     }
 }
 
-private var socketStreamType: Int32 {
+var socketStreamType: Int32 {
     #if os(Linux)
     return Int32(SOCK_STREAM.rawValue)
     #else
