@@ -342,7 +342,15 @@ private final class StdioBridge {
             let readCount = buffer.withUnsafeMutableBytes { ptr in
                 bridgeRead(STDIN_FILENO, ptr.baseAddress, ptr.count)
             }
-            if readCount <= 0 {
+            if readCount < 0 {
+                let currentErrno = errno
+                if isRetryableBridgeErrno(currentErrno) {
+                    Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                    continue
+                }
+                return
+            }
+            if readCount == 0 {
                 let fd = currentSocketFD()
                 if fd >= 0 {
                     _ = bridgeShutdown(fd, bridgeShutdownWrite)
@@ -367,7 +375,15 @@ private final class StdioBridge {
             let readCount = buffer.withUnsafeMutableBytes { ptr in
                 bridgeRead(fd, ptr.baseAddress, ptr.count)
             }
-            if readCount <= 0 {
+            if readCount < 0 {
+                let currentErrno = errno
+                if isRetryableBridgeErrno(currentErrno) {
+                    Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                    continue
+                }
+                return
+            }
+            if readCount == 0 {
                 return
             }
 
@@ -389,7 +405,15 @@ private final class StdioBridge {
             var offset = 0
             while offset < count {
                 let written = bridgeWrite(fd, base.advanced(by: offset), count - offset)
-                if written <= 0 {
+                if written < 0 {
+                    let currentErrno = errno
+                    if isRetryableBridgeErrno(currentErrno) {
+                        Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                        continue
+                    }
+                    return false
+                }
+                if written == 0 {
                     return false
                 }
                 offset += written
@@ -404,6 +428,19 @@ private final class StdioBridge {
         stateLock.unlock()
         return fd
     }
+}
+
+let bridgeRetryDelaySeconds: TimeInterval = 0.01
+
+func isRetryableBridgeErrno(_ value: Int32) -> Bool {
+    if value == EINTR || value == EAGAIN {
+        return true
+    }
+    #if os(Linux)
+    return value == EWOULDBLOCK
+    #else
+    return value == EWOULDBLOCK
+    #endif
 }
 
 private func connectLoopback(host: String, port: Int) throws -> Int32 {
