@@ -62,6 +62,7 @@ let package = Package(
                 "Holons",
                 .product(name: "GRPC", package: "grpc-swift"),
                 .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ],
             exclude: ["Fixtures"]
         )

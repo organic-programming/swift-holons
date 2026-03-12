@@ -1,4 +1,6 @@
 import Foundation
+import GRPC
+import NIOCore
 
 public func buildDescribeResponse(protoDir: String, holonYAMLPath: String) throws -> Holonmeta_V1_DescribeResponse {
     let identity = try Identity.parseHolon(holonYAMLPath)
@@ -13,7 +15,7 @@ public func buildDescribeResponse(protoDir: String, holonYAMLPath: String) throw
     return response
 }
 
-public struct HolonMetaDescribeProvider {
+public final class HolonMetaDescribeProvider: Holonmeta_V1_HolonMetaProvider {
     private let response: Holonmeta_V1_DescribeResponse
 
     public init(protoDir: String, holonYAMLPath: String) throws {
@@ -23,6 +25,14 @@ public struct HolonMetaDescribeProvider {
     public func describe(_ request: Holonmeta_V1_DescribeRequest = .init()) -> Holonmeta_V1_DescribeResponse {
         _ = request
         return response
+    }
+
+    public func describe(
+        request: Holonmeta_V1_DescribeRequest,
+        context: StatusOnlyCallContext
+    ) -> EventLoopFuture<Holonmeta_V1_DescribeResponse> {
+        _ = request
+        return context.eventLoop.makeSucceededFuture(response)
     }
 }
 
