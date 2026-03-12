@@ -416,10 +416,18 @@ private func connectInternal(_ target: String, options: ConnectOptions) throws -
 
     switch transport {
     case "stdio":
-        return try connectStdioHolon(binaryPath: binaryPath, timeout: timeout)
+        return try connectStdioHolon(
+            binaryPath: binaryPath,
+            workingDirectory: entry.dir.path,
+            timeout: timeout
+        )
 
     case "tcp":
-        let started = try startTCPHolon(binaryPath: binaryPath, timeout: timeout)
+        let started = try startTCPHolon(
+            binaryPath: binaryPath,
+            workingDirectory: entry.dir.path,
+            timeout: timeout
+        )
         do {
             let channel = try dialReady(
                 target: try normalizeDialTarget(started.uri),
@@ -592,10 +600,17 @@ private struct StartedTCPHolon {
     let stderr: StringCollector
 }
 
-private func startTCPHolon(binaryPath: String, timeout: TimeInterval) throws -> StartedTCPHolon {
+private func startTCPHolon(
+    binaryPath: String,
+    workingDirectory: String?,
+    timeout: TimeInterval
+) throws -> StartedTCPHolon {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: binaryPath)
     process.arguments = ["serve", "--listen", "tcp://127.0.0.1:0"]
+    if let workingDirectory, !workingDirectory.isEmpty {
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+    }
 
     let stdout = Pipe()
     let stderr = Pipe()
@@ -633,7 +648,11 @@ private func startTCPHolon(binaryPath: String, timeout: TimeInterval) throws -> 
     throw ConnectError.startupFailed("timed out waiting for holon startup")
 }
 
-private func connectStdioHolon(binaryPath: String, timeout: TimeInterval) throws -> GRPCChannel {
+private func connectStdioHolon(
+    binaryPath: String,
+    workingDirectory: String?,
+    timeout: TimeInterval
+) throws -> GRPCChannel {
     let sockets = try makeSocketPair()
     let childInputFD = try duplicateDescriptor(sockets.child)
     let childOutputFD = try duplicateDescriptor(sockets.child)
@@ -655,6 +674,9 @@ private func connectStdioHolon(binaryPath: String, timeout: TimeInterval) throws
     let process = Process()
     process.executableURL = URL(fileURLWithPath: binaryPath)
     process.arguments = ["serve", "--listen", "stdio://"]
+    if let workingDirectory, !workingDirectory.isEmpty {
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+    }
     process.standardInput = childInput
     process.standardOutput = childOutput
     process.standardError = stderrPipe
