@@ -129,6 +129,40 @@ final class ConnectTests: XCTestCase {
         try waitForProcessExit(pid)
     }
 
+    func testConnectWithUnixOptionsWritesPortFileAndReusesServer() throws {
+        let sandbox = try makeSandbox(prefix: "connect-unix")
+        defer { try? FileManager.default.removeItem(at: sandbox.root) }
+
+        let fixture = try sandbox.makeHolonFixture(slug: "connect-unix")
+        let previousDirectory = FileManager.default.currentDirectoryPath
+        defer {
+            XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(previousDirectory))
+        }
+        XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(sandbox.root.path))
+
+        let initial = try connect(
+            fixture.slug,
+            options: ConnectOptions(timeout: 5.0, transport: "unix", start: true)
+        )
+        let pid = try waitForPID(at: fixture.pidFile)
+        XCTAssertEqual(try describeSlug(initial, timeout: 2.0), fixture.slug)
+        try disconnect(initial)
+
+        XCTAssertTrue(pidExists(pid))
+
+        let portTarget = try String(contentsOf: fixture.portFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(portTarget.hasPrefix("unix:///tmp/holons-"))
+
+        let reused = try connect(fixture.slug)
+        XCTAssertEqual(try describeSlug(reused, timeout: 2.0), fixture.slug)
+        try disconnect(reused)
+
+        XCTAssertTrue(pidExists(pid))
+        terminateProcess(pid)
+        try waitForProcessExit(pid)
+    }
+
     func testConnectRemovesStalePortFileAndStartsFresh() throws {
         let sandbox = try makeSandbox(prefix: "connect-stale")
         defer { try? FileManager.default.removeItem(at: sandbox.root) }

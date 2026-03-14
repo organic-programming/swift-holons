@@ -465,6 +465,39 @@ private func connectInternal(_ target: String, options: ConnectOptions) throws -
             throw error
         }
 
+    case "unix":
+        guard options.start else {
+            throw ConnectError.holonNotRunning(trimmed)
+        }
+
+        let binaryPath = try resolveBinaryPath(entry)
+        let started = try startUnixHolon(
+            binaryPath: binaryPath,
+            slug: entry.slug,
+            portFile: portFile,
+            timeout: timeout,
+            workingDirectory: entry.dir.path
+        )
+        do {
+            let channel = try dialReady(
+                target: try normalizeDialTarget(started.uri),
+                timeout: timeout,
+                process: started.process,
+                ephemeral: false,
+                stderr: started.stderr
+            )
+            do {
+                try writePortFile(path: portFile, uri: started.uri)
+            } catch {
+                try? disconnect(channel)
+                try? stopProcess(started.process)
+                throw error
+            }
+            return channel
+        } catch {
+            throw error
+        }
+
     default:
         throw ConnectError.unsupportedTransport(transport)
     }
@@ -477,7 +510,7 @@ private func normalizedTransport(_ transport: String) throws -> String {
     }
 
     switch normalized {
-    case "stdio", "tcp", "mem":
+    case "stdio", "tcp", "unix", "mem":
         return normalized
     default:
         throw ConnectError.unsupportedTransport(transport)
@@ -630,7 +663,7 @@ private func describe(channel: GRPCChannel, timeout: TimeInterval) throws -> Raw
     return try call.response.wait()
 }
 
-private struct StartedTCPHolon {
+private struct StartedHolon {
     let uri: String
     let process: Process
     let stderr: StringCollector
@@ -640,7 +673,7 @@ private func startTCPHolon(
     binaryPath: String,
     workingDirectory: String?,
     timeout: TimeInterval
-) throws -> StartedTCPHolon {
+) throws -> StartedHolon {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: binaryPath)
     process.arguments = ["serve", "--listen", "tcp://127.0.0.1:0"]
@@ -672,7 +705,7 @@ private func startTCPHolon(
         }
 
         if let line = lineQueue.pop(timeout: 0.05), let uri = firstURI(in: line) {
-            return StartedTCPHolon(uri: uri, process: process, stderr: stderrCollector)
+            return StartedHolon(uri: uri, process: process, stderr: stderrCollector)
         }
     }
 
@@ -682,6 +715,59 @@ private func startTCPHolon(
         throw ConnectError.startupFailed("timed out waiting for holon startup: \(stderrText)")
     }
     throw ConnectError.startupFailed("timed out waiting for holon startup")
+}
+
+private func startUnixHolon(
+    binaryPath: String,
+    slug: String,
+    portFile: String,
+    timeout: TimeInterval,
+    workingDirectory: String?
+) throws -> StartedHolon {
+    let process = Process()
+    let socketURI = defaultUnixSocketURI(slug: slug, portFile: portFile)
+    let socketPath = String(socketURI.dropFirst("unix://".count))
+    process.executableURL = URL(fileURLWithPath: binaryPath)
+    process.arguments = ["serve", "--listen", socketURI]
+    if let workingDirectory, !workingDirectory.isEmpty {
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+    }
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    let stderrCollector = StringCollector()
+
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+
+    startLineReader(handle: stdout.fileHandleForReading, queue: nil, collector: nil)
+    startLineReader(handle: stderr.fileHandleForReading, queue: nil, collector: stderrCollector)
+
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if FileManager.default.fileExists(atPath: socketPath) {
+            return StartedHolon(uri: socketURI, process: process, stderr: stderrCollector)
+        }
+
+        if !process.isRunning {
+            let stderrText = stderrCollector.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stderrText.isEmpty {
+                throw ConnectError.startupFailed("holon exited before binding unix socket: \(stderrText)")
+            }
+            throw ConnectError.startupFailed("holon exited before binding unix socket")
+        }
+
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+
+    try? stopProcess(process)
+    let stderrText = stderrCollector.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !stderrText.isEmpty {
+        throw ConnectError.startupFailed("timed out waiting for unix holon startup: \(stderrText)")
+    }
+    throw ConnectError.startupFailed("timed out waiting for unix holon startup")
 }
 
 private func connectStdioHolon(
@@ -820,6 +906,49 @@ private func normalizedPortFilePath(_ override: String?, slug: String) -> String
         .appendingPathComponent("run")
         .appendingPathComponent("\(slug).port")
         .path
+}
+
+private func defaultUnixSocketURI(slug: String, portFile: String) -> String {
+    let hash = fnv1a64(Array(portFile.utf8))
+    let label = socketLabel(slug)
+    return "unix:///tmp/holons-\(label)-\(String(format: "%012llx", hash & 0xffffffffffff)).sock"
+}
+
+private func socketLabel(_ slug: String) -> String {
+    var label = ""
+    var lastWasDash = false
+
+    for scalar in slug.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().unicodeScalars {
+        switch scalar.value {
+        case 97 ... 122, 48 ... 57:
+            label.unicodeScalars.append(scalar)
+            lastWasDash = false
+        case 45 where !label.isEmpty && !lastWasDash:
+            label.append("-")
+            lastWasDash = true
+        case 95 where !label.isEmpty && !lastWasDash:
+            label.append("-")
+            lastWasDash = true
+        default:
+            continue
+        }
+
+        if label.count >= 24 {
+            break
+        }
+    }
+
+    label = label.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    return label.isEmpty ? "socket" : label
+}
+
+private func fnv1a64(_ bytes: [UInt8]) -> UInt64 {
+    var hash: UInt64 = 0xcbf29ce484222325
+    for byte in bytes {
+        hash ^= UInt64(byte)
+        hash &*= 0x100000001b3
+    }
+    return hash
 }
 
 private func writePortFile(path: String, uri: String) throws {
