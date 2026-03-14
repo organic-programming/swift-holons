@@ -200,6 +200,36 @@ public enum Serve {
                 defaultGracePeriodSeconds: options.shutdownGracePeriodSeconds,
                 auxiliaryStop: { bridge.stop() }
             )
+        case "unix":
+            let path = parsed.path ?? ""
+            let backing = try startTCPServer(
+                host: "127.0.0.1",
+                port: 0,
+                publicURI: nil,
+                serviceProviders: providers,
+                describeEnabled: describeEnabled,
+                options: options,
+                suppressAnnouncement: true
+            )
+            let parsedBacking = try Transport.parse(backing.publicURI)
+            let bridge = try UnixBridge(
+                path: path,
+                host: parsedBacking.host ?? "127.0.0.1",
+                port: parsedBacking.port ?? 0
+            )
+            bridge.start()
+            let publicURI = "unix://\(path)"
+            let mode = describeEnabled ? "Describe ON" : "Describe OFF"
+            options.onListen?(publicURI)
+            options.logger("gRPC server listening on \(publicURI) (\(mode))")
+            return RunningServer(
+                server: backing.server,
+                group: backing.group,
+                publicURI: publicURI,
+                logger: options.logger,
+                defaultGracePeriodSeconds: options.shutdownGracePeriodSeconds,
+                auxiliaryStop: { bridge.stop() }
+            )
         case "mem":
             let name = parsed.path ?? ""
             let backing = try startTCPServer(
@@ -233,7 +263,7 @@ public enum Serve {
         default:
             throw TransportError.runtimeUnsupported(
                 uri: listenURI,
-                reason: "Serve.run(...) currently supports tcp://, stdio://, and mem:// only"
+                reason: "Serve.run(...) currently supports tcp://, unix://, stdio://, and mem:// only"
             )
         }
     }
@@ -457,6 +487,232 @@ private final class StdioBridge {
         let fd = socketFD
         stateLock.unlock()
         return fd
+    }
+}
+
+private final class UnixBridge {
+    private let stateLock = NSLock()
+    private let listener: UnixRuntimeListener
+    private let host: String
+    private let port: Int
+    private var stopped = false
+    private var started = false
+    private var activeConnections: [ActiveUnixBridgeConnection] = []
+
+    init(path: String, host: String, port: Int) throws {
+        self.listener = try UnixRuntimeListener(path: path)
+        self.host = host
+        self.port = port
+    }
+
+    func start() {
+        stateLock.lock()
+        if started {
+            stateLock.unlock()
+            return
+        }
+        started = true
+        stateLock.unlock()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.acceptLoop()
+        }
+    }
+
+    func stop() {
+        stateLock.lock()
+        if stopped {
+            stateLock.unlock()
+            return
+        }
+        stopped = true
+        let active = activeConnections
+        activeConnections.removeAll()
+        stateLock.unlock()
+
+        for connection in active {
+            connection.stop()
+        }
+        try? listener.close()
+    }
+
+    private func acceptLoop() {
+        while !isStopped {
+            do {
+                let connection = try listener.accept()
+                let socketFD = try connectLoopback(host: host, port: port)
+                let active = ActiveUnixBridgeConnection(
+                    connection: connection,
+                    socketFD: socketFD
+                ) { [weak self] closed in
+                    self?.removeConnection(closed)
+                }
+                appendConnection(active)
+                active.start()
+            } catch {
+                if isStopped {
+                    return
+                }
+                Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+            }
+        }
+    }
+
+    private var isStopped: Bool {
+        stateLock.lock()
+        let value = stopped
+        stateLock.unlock()
+        return value
+    }
+
+    private func appendConnection(_ connection: ActiveUnixBridgeConnection) {
+        stateLock.lock()
+        if stopped {
+            stateLock.unlock()
+            connection.stop()
+            return
+        }
+        activeConnections.append(connection)
+        stateLock.unlock()
+    }
+
+    private func removeConnection(_ connection: ActiveUnixBridgeConnection) {
+        stateLock.lock()
+        activeConnections.removeAll { $0 === connection }
+        stateLock.unlock()
+    }
+}
+
+private final class ActiveUnixBridgeConnection {
+    private let stateLock = NSLock()
+    private let connection: RuntimeConnection
+    private let socketFD: Int32
+    private let onClose: (ActiveUnixBridgeConnection) -> Void
+    private var stopped = false
+    private let completion = DispatchGroup()
+
+    init(
+        connection: RuntimeConnection,
+        socketFD: Int32,
+        onClose: @escaping (ActiveUnixBridgeConnection) -> Void
+    ) {
+        self.connection = connection
+        self.socketFD = socketFD
+        self.onClose = onClose
+    }
+
+    func start() {
+        completion.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.pumpConnectionToSocket()
+            self.completion.leave()
+        }
+
+        completion.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.pumpSocketToConnection()
+            self.completion.leave()
+        }
+
+        completion.notify(queue: .global(qos: .utility)) {
+            self.stop()
+        }
+    }
+
+    func stop() {
+        stateLock.lock()
+        if stopped {
+            stateLock.unlock()
+            return
+        }
+        stopped = true
+        stateLock.unlock()
+
+        try? connection.close()
+        _ = bridgeShutdown(socketFD, bridgeShutdownReadWrite)
+        _ = bridgeClose(socketFD)
+        onClose(self)
+    }
+
+    private func pumpConnectionToSocket() {
+        while !isStopped {
+            do {
+                let data = try connection.read(maxBytes: 16 * 1024)
+                if data.isEmpty {
+                    _ = bridgeShutdown(socketFD, bridgeShutdownWrite)
+                    return
+                }
+
+                let bytes = [UInt8](data)
+                if writeAll(bytes, count: bytes.count, to: socketFD) == false {
+                    return
+                }
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func pumpSocketToConnection() {
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while !isStopped {
+            let readCount = buffer.withUnsafeMutableBytes { ptr in
+                bridgeRead(socketFD, ptr.baseAddress, ptr.count)
+            }
+            if readCount < 0 {
+                let currentErrno = errno
+                if isRetryableBridgeErrno(currentErrno) {
+                    Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                    continue
+                }
+                return
+            }
+            if readCount == 0 {
+                return
+            }
+
+            do {
+                try connection.write(Data(buffer.prefix(readCount)))
+            } catch {
+                return
+            }
+        }
+    }
+
+    private var isStopped: Bool {
+        stateLock.lock()
+        let value = stopped
+        stateLock.unlock()
+        return value
+    }
+
+    private func writeAll(_ buffer: [UInt8], count: Int, to fd: Int32) -> Bool {
+        guard fd >= 0 else {
+            return false
+        }
+
+        return buffer.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else {
+                return true
+            }
+            var offset = 0
+            while offset < count {
+                let written = bridgeWrite(fd, base.advanced(by: offset), count - offset)
+                if written < 0 {
+                    let currentErrno = errno
+                    if isRetryableBridgeErrno(currentErrno) {
+                        Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                        continue
+                    }
+                    return false
+                }
+                if written == 0 {
+                    return false
+                }
+                offset += written
+            }
+            return true
+        }
     }
 }
 

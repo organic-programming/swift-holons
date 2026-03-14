@@ -53,18 +53,54 @@ final class ServeTests: XCTestCase {
         XCTAssertEqual(response.services.first?.name, "echo.v1.Echo")
     }
 
-    func testStartWithOptionsRejectsNonTCP() {
-        XCTAssertThrowsError(
-            try Serve.startWithOptions(
-                "unix:///tmp/holons-serve-test.sock",
-                serviceProviders: []
+    func testStartWithOptionsRegistersDescribeServiceOverUnix() throws {
+        let root = try writeEchoHolon()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let socketPath = root.appendingPathComponent("serve.sock").path
+        let running = try Serve.startWithOptions(
+            "unix://\(socketPath)",
+            serviceProviders: [],
+            options: Serve.Options(
+                logger: { _ in },
+                protoDir: root.appendingPathComponent("protos").path,
+                holonYAMLPath: root.appendingPathComponent("holon.yaml").path
             )
         )
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        var configuration = ClientConnection.Configuration.default(
+            target: .unixDomainSocket(socketPath),
+            eventLoopGroup: group
+        )
+        configuration.connectionBackoff = nil
+        let channel = ClientConnection(configuration: configuration)
+
+        defer {
+            _ = try? channel.close().wait()
+            running.stop()
+            try? group.syncShutdownGracefully()
+        }
+
+        let call = channel.makeUnaryCall(
+            path: "/holonmeta.v1.HolonMeta/Describe",
+            request: TestProtobufPayload(message: Holonmeta_V1_DescribeRequest()),
+            callOptions: CallOptions()
+        ) as UnaryCall<
+            TestProtobufPayload<Holonmeta_V1_DescribeRequest>,
+            TestProtobufPayload<Holonmeta_V1_DescribeResponse>
+        >
+        let response = try call.response.wait().message
+
+        XCTAssertEqual(running.publicURI, "unix://\(socketPath)")
+        XCTAssertEqual(response.slug, "echo-server")
+        XCTAssertEqual(response.services.count, 1)
+        XCTAssertEqual(response.services.first?.name, "echo.v1.Echo")
     }
 
     private func writeEchoHolon() throws -> URL {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("swift_holons_serve_\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("shs_\(UUID().uuidString.prefix(8))", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let protoDir = root.appendingPathComponent("protos/echo/v1", isDirectory: true)
         try FileManager.default.createDirectory(at: protoDir, withIntermediateDirectories: true)
