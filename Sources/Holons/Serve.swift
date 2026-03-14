@@ -200,10 +200,40 @@ public enum Serve {
                 defaultGracePeriodSeconds: options.shutdownGracePeriodSeconds,
                 auxiliaryStop: { bridge.stop() }
             )
+        case "mem":
+            let name = parsed.path ?? ""
+            let backing = try startTCPServer(
+                host: "127.0.0.1",
+                port: 0,
+                publicURI: nil,
+                serviceProviders: providers,
+                describeEnabled: describeEnabled,
+                options: options,
+                suppressAnnouncement: true
+            )
+            let parsedBacking = try Transport.parse(backing.publicURI)
+            let bridge = try MemServeBridge(
+                name: name,
+                host: parsedBacking.host ?? "127.0.0.1",
+                port: parsedBacking.port ?? 0
+            )
+            bridge.start()
+            let publicURI = name.isEmpty ? "mem://" : "mem://\(name)"
+            let mode = describeEnabled ? "Describe ON" : "Describe OFF"
+            options.onListen?(publicURI)
+            options.logger("gRPC server listening on \(publicURI) (\(mode))")
+            return RunningServer(
+                server: backing.server,
+                group: backing.group,
+                publicURI: publicURI,
+                logger: options.logger,
+                defaultGracePeriodSeconds: options.shutdownGracePeriodSeconds,
+                auxiliaryStop: { bridge.stop() }
+            )
         default:
             throw TransportError.runtimeUnsupported(
                 uri: listenURI,
-                reason: "Serve.run(...) currently supports tcp:// and stdio:// only"
+                reason: "Serve.run(...) currently supports tcp://, stdio://, and mem:// only"
             )
         }
     }
@@ -342,7 +372,15 @@ private final class StdioBridge {
             let readCount = buffer.withUnsafeMutableBytes { ptr in
                 bridgeRead(STDIN_FILENO, ptr.baseAddress, ptr.count)
             }
-            if readCount <= 0 {
+            if readCount < 0 {
+                let currentErrno = errno
+                if isRetryableBridgeErrno(currentErrno) {
+                    Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                    continue
+                }
+                return
+            }
+            if readCount == 0 {
                 let fd = currentSocketFD()
                 if fd >= 0 {
                     _ = bridgeShutdown(fd, bridgeShutdownWrite)
@@ -367,7 +405,15 @@ private final class StdioBridge {
             let readCount = buffer.withUnsafeMutableBytes { ptr in
                 bridgeRead(fd, ptr.baseAddress, ptr.count)
             }
-            if readCount <= 0 {
+            if readCount < 0 {
+                let currentErrno = errno
+                if isRetryableBridgeErrno(currentErrno) {
+                    Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                    continue
+                }
+                return
+            }
+            if readCount == 0 {
                 return
             }
 
@@ -389,7 +435,15 @@ private final class StdioBridge {
             var offset = 0
             while offset < count {
                 let written = bridgeWrite(fd, base.advanced(by: offset), count - offset)
-                if written <= 0 {
+                if written < 0 {
+                    let currentErrno = errno
+                    if isRetryableBridgeErrno(currentErrno) {
+                        Thread.sleep(forTimeInterval: bridgeRetryDelaySeconds)
+                        continue
+                    }
+                    return false
+                }
+                if written == 0 {
                     return false
                 }
                 offset += written
@@ -404,6 +458,19 @@ private final class StdioBridge {
         stateLock.unlock()
         return fd
     }
+}
+
+let bridgeRetryDelaySeconds: TimeInterval = 0.01
+
+func isRetryableBridgeErrno(_ value: Int32) -> Bool {
+    if value == EINTR || value == EAGAIN {
+        return true
+    }
+    #if os(Linux)
+    return value == EWOULDBLOCK
+    #else
+    return value == EWOULDBLOCK
+    #endif
 }
 
 private func connectLoopback(host: String, port: Int) throws -> Int32 {

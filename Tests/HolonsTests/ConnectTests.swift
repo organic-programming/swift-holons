@@ -38,6 +38,63 @@ final class ConnectTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.portFile.path))
     }
 
+    func testConnectStartsSlugFromHolonDirectory() throws {
+        let sandbox = try makeSandbox(prefix: "connect-cwd")
+        defer { try? FileManager.default.removeItem(at: sandbox.root) }
+
+        let fixture = try sandbox.makeHolonFixture(slug: "connect-cwd")
+        let previousDirectory = FileManager.default.currentDirectoryPath
+        defer {
+            XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(previousDirectory))
+        }
+        XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(sandbox.root.path))
+
+        let channel = try connect(fixture.slug)
+        defer { try? disconnect(channel) }
+
+        _ = try waitForPID(at: fixture.pidFile)
+        let childDirectory = URL(
+            fileURLWithPath: try waitForFileContents(at: fixture.cwdFile)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            isDirectory: true
+        ).resolvingSymlinksInPath().path
+        XCTAssertEqual(childDirectory, fixture.holonDir.resolvingSymlinksInPath().path)
+    }
+
+    func testConnectStartsSlugOverMemWhenRegisteredInProcess() throws {
+        let sandbox = try makeSandbox(prefix: "connect-mem")
+        defer { try? FileManager.default.removeItem(at: sandbox.root) }
+
+        let fixture = try sandbox.makeHolonFixture(slug: "connect-mem")
+        try writeEchoProto(into: fixture.holonDir)
+
+        let previousDirectory = FileManager.default.currentDirectoryPath
+        defer {
+            XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(previousDirectory))
+        }
+        XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(sandbox.root.path))
+
+        let running = try Serve.startWithOptions(
+            "mem://\(fixture.slug)",
+            serviceProviders: [],
+            options: Serve.Options(
+                logger: { _ in },
+                protoDir: fixture.holonDir.appendingPathComponent("protos").path,
+                holonYAMLPath: fixture.holonDir.appendingPathComponent("holon.yaml").path
+            )
+        )
+        defer { running.stop() }
+
+        let channel = try connect(
+            fixture.slug,
+            options: ConnectOptions(timeout: 2.0, transport: "mem", start: true)
+        )
+        defer { try? disconnect(channel) }
+
+        let slug = try describeSlug(channel, timeout: 2.0)
+        XCTAssertEqual(slug, fixture.slug)
+    }
+
     func testConnectWithTCPOptionsWritesPortFileAndReusesServer() throws {
         let sandbox = try makeSandbox(prefix: "connect-port")
         defer { try? FileManager.default.removeItem(at: sandbox.root) }
@@ -108,6 +165,8 @@ private struct ConnectSandbox {
         let slug: String
         let pidFile: URL
         let portFile: URL
+        let cwdFile: URL
+        let holonDir: URL
     }
 
     func makeHolonFixture(slug: String) throws -> Fixture {
@@ -121,10 +180,12 @@ private struct ConnectSandbox {
         try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true)
 
         let pidFile = root.appendingPathComponent("\(slug).pid")
+        let cwdFile = root.appendingPathComponent("\(slug).cwd")
         let wrapper = binaryDir.appendingPathComponent("holon-helper")
         let script = """
         #!/bin/sh
         printf '%s\n' "$$" > \(shellQuote(pidFile.path))
+        pwd > \(shellQuote(cwdFile.path))
         exec \(shellQuote(helperExecutable.path)) --slug \(shellQuote(slug)) "$@"
         """
         try script.write(to: wrapper, atomically: true, encoding: .utf8)
@@ -150,7 +211,9 @@ private struct ConnectSandbox {
             portFile: root
                 .appendingPathComponent(".op")
                 .appendingPathComponent("run")
-                .appendingPathComponent("\(slug).port")
+                .appendingPathComponent("\(slug).port"),
+            cwdFile: cwdFile,
+            holonDir: holonDir
         )
     }
 }
@@ -229,6 +292,27 @@ private func makeSandbox(prefix: String) throws -> ConnectSandbox {
             .appendingPathComponent("go-holons"),
         helperExecutable: helperExecutable
     )
+}
+
+private func writeEchoProto(into holonDir: URL) throws {
+    let protoDir = holonDir.appendingPathComponent("protos/echo/v1", isDirectory: true)
+    try FileManager.default.createDirectory(at: protoDir, withIntermediateDirectories: true)
+    try """
+    syntax = "proto3";
+    package echo.v1;
+
+    service Echo {
+      rpc Ping(PingRequest) returns (PingResponse);
+    }
+
+    message PingRequest {
+      string message = 1;
+    }
+
+    message PingResponse {
+      string message = 1;
+    }
+    """.write(to: protoDir.appendingPathComponent("echo.proto"), atomically: true, encoding: .utf8)
 }
 
 private func startConnectHelperServer(slug: String, listen: String) throws -> RunningConnectHelperServer {
@@ -441,6 +525,18 @@ private func waitForPID(at path: URL, timeout: TimeInterval = 5.0) throws -> Int
         Thread.sleep(forTimeInterval: 0.025)
     }
     throw ConnectError.ioFailure("timed out waiting for pid file \(path.path)")
+}
+
+private func waitForFileContents(at path: URL, timeout: TimeInterval = 5.0) throws -> String {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if let raw = try? String(contentsOf: path, encoding: .utf8),
+           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return raw
+        }
+        Thread.sleep(forTimeInterval: 0.025)
+    }
+    throw ConnectError.ioFailure("timed out waiting for file \(path.path)")
 }
 
 private func pidExists(_ pid: Int32) -> Bool {

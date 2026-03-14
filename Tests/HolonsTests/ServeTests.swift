@@ -6,6 +6,13 @@ import XCTest
 @testable import Holons
 
 final class ServeTests: XCTestCase {
+    func testRetryableBridgeErrnosCoverTransientReadWriteFailures() {
+        XCTAssertTrue(isRetryableBridgeErrno(EINTR))
+        XCTAssertTrue(isRetryableBridgeErrno(EAGAIN))
+        XCTAssertTrue(isRetryableBridgeErrno(EWOULDBLOCK))
+        XCTAssertFalse(isRetryableBridgeErrno(EBADF))
+    }
+
     func testStartWithOptionsRegistersDescribeService() throws {
         let root = try writeEchoHolon()
         defer { try? FileManager.default.removeItem(at: root) }
