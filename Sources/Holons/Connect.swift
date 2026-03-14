@@ -34,6 +34,7 @@ public enum ConnectError: Error, CustomStringConvertible {
     case unsupportedTransport(String)
     case unsupportedDialTarget(String)
     case invalidDirectTarget(String)
+    case memListenerNotFound(String)
     case holonNotFound(String)
     case holonNotRunning(String)
     case missingManifest(String)
@@ -53,6 +54,8 @@ public enum ConnectError: Error, CustomStringConvertible {
             return "unsupported dial target \"\(target)\""
         case let .invalidDirectTarget(target):
             return "invalid direct target \"\(target)\""
+        case let .memListenerNotFound(name):
+            return "in-process mem listener not found for \"\(name)\""
         case let .holonNotFound(slug):
             return "holon \"\(slug)\" not found"
         case let .holonNotRunning(slug):
@@ -93,6 +96,7 @@ private struct DialTarget {
     enum Kind {
         case hostPort(String, Int)
         case unix(String)
+        case mem(String)
         case connectedSocket(Int32)
     }
 
@@ -102,7 +106,7 @@ private struct DialTarget {
 private struct ConnectionHandle {
     let group: MultiThreadedEventLoopGroup
     let process: Process?
-    let relay: SocketRelay?
+    let relay: (any RelayHandle)?
     let ephemeral: Bool
 }
 
@@ -171,7 +175,7 @@ private final class ConnectionDiagnostics: NSObject, ClientErrorDelegate, Connec
     }
 }
 
-private final class SocketRelay {
+private final class SocketRelay: RelayHandle {
     private let stateLock = NSLock()
     private let listener: TCPRuntimeListener
     private let upstreamFD: Int32
@@ -398,7 +402,8 @@ private func connectInternal(_ target: String, options: ConnectOptions) throws -
     }
 
     let portFile = normalizedPortFilePath(options.portFile, slug: entry.slug)
-    if let reusable = try usablePortFile(portFile, timeout: timeout) {
+    if transport != "mem",
+       let reusable = try usablePortFile(portFile, timeout: timeout) {
         return try dialReady(
             target: try normalizeDialTarget(reusable),
             timeout: timeout,
@@ -408,14 +413,21 @@ private func connectInternal(_ target: String, options: ConnectOptions) throws -
         )
     }
 
-    guard options.start else {
-        throw ConnectError.holonNotRunning(trimmed)
-    }
-
-    let binaryPath = try resolveBinaryPath(entry)
-
     switch transport {
+    case "mem":
+        return try dialReady(
+            target: DialTarget(kind: .mem(entry.slug)),
+            timeout: timeout,
+            process: nil,
+            ephemeral: true,
+            stderr: nil
+        )
+
     case "stdio":
+        guard options.start else {
+            throw ConnectError.holonNotRunning(trimmed)
+        }
+        let binaryPath = try resolveBinaryPath(entry)
         return try connectStdioHolon(
             binaryPath: binaryPath,
             workingDirectory: entry.dir.path,
@@ -423,6 +435,11 @@ private func connectInternal(_ target: String, options: ConnectOptions) throws -
         )
 
     case "tcp":
+        guard options.start else {
+            throw ConnectError.holonNotRunning(trimmed)
+        }
+
+        let binaryPath = try resolveBinaryPath(entry)
         let started = try startTCPHolon(
             binaryPath: binaryPath,
             workingDirectory: entry.dir.path,
@@ -460,7 +477,7 @@ private func normalizedTransport(_ transport: String) throws -> String {
     }
 
     switch normalized {
-    case "stdio", "tcp":
+    case "stdio", "tcp", "mem":
         return normalized
     default:
         throw ConnectError.unsupportedTransport(transport)
@@ -471,10 +488,27 @@ private func dialReady(
     target: DialTarget,
     timeout: TimeInterval,
     process: Process?,
-    relay: SocketRelay? = nil,
+    relay: (any RelayHandle)? = nil,
     ephemeral: Bool,
     stderr: StringCollector?
 ) throws -> GRPCChannel {
+    if case let .mem(name) = target.kind {
+        let memRelay = try MemDialRelay(name: name)
+        do {
+            return try dialReady(
+                target: try normalizeDialTarget(memRelay.boundURI),
+                timeout: timeout,
+                process: process,
+                relay: memRelay,
+                ephemeral: ephemeral,
+                stderr: stderr
+            )
+        } catch {
+            memRelay.close()
+            throw error
+        }
+    }
+
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     let diagnostics = ConnectionDiagnostics()
     let connection: ClientConnection
@@ -539,6 +573,8 @@ private func makeConnection(
         configuration.errorDelegate = diagnostics
         configuration.connectivityStateDelegate = diagnostics
         return ClientConnection(configuration: configuration)
+    case .mem:
+        throw ConnectError.unsupportedDialTarget("mem")
     case let .connectedSocket(socket):
         return ClientConnection.insecure(group: group)
             .withConnectionReestablishment(enabled: false)
@@ -554,7 +590,7 @@ private func waitForReady(
     process: Process?,
     stderr: StringCollector?,
     diagnostics: ConnectionDiagnostics?,
-    relay: SocketRelay?
+    relay: (any RelayHandle)?
 ) throws {
     do {
         _ = try describe(channel: channel, timeout: timeout)
@@ -817,6 +853,8 @@ private func normalizeDialTarget(_ target: String) throws -> DialTarget {
             throw ConnectError.invalidDirectTarget(trimmed)
         }
         return DialTarget(kind: .unix(path))
+    case "mem":
+        return DialTarget(kind: .mem(parsed.path ?? ""))
     default:
         throw ConnectError.unsupportedDialTarget(trimmed)
     }
@@ -867,6 +905,7 @@ private func firstURI(in line: String) -> String? {
         if candidate.hasPrefix("tcp://") ||
             candidate.hasPrefix("unix://") ||
             candidate.hasPrefix("stdio://") ||
+            candidate.hasPrefix("mem://") ||
             candidate.hasPrefix("ws://") ||
             candidate.hasPrefix("wss://") {
             return candidate

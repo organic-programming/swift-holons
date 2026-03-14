@@ -200,10 +200,40 @@ public enum Serve {
                 defaultGracePeriodSeconds: options.shutdownGracePeriodSeconds,
                 auxiliaryStop: { bridge.stop() }
             )
+        case "mem":
+            let name = parsed.path ?? ""
+            let backing = try startTCPServer(
+                host: "127.0.0.1",
+                port: 0,
+                publicURI: nil,
+                serviceProviders: providers,
+                describeEnabled: describeEnabled,
+                options: options,
+                suppressAnnouncement: true
+            )
+            let parsedBacking = try Transport.parse(backing.publicURI)
+            let bridge = try MemServeBridge(
+                name: name,
+                host: parsedBacking.host ?? "127.0.0.1",
+                port: parsedBacking.port ?? 0
+            )
+            bridge.start()
+            let publicURI = name.isEmpty ? "mem://" : "mem://\(name)"
+            let mode = describeEnabled ? "Describe ON" : "Describe OFF"
+            options.onListen?(publicURI)
+            options.logger("gRPC server listening on \(publicURI) (\(mode))")
+            return RunningServer(
+                server: backing.server,
+                group: backing.group,
+                publicURI: publicURI,
+                logger: options.logger,
+                defaultGracePeriodSeconds: options.shutdownGracePeriodSeconds,
+                auxiliaryStop: { bridge.stop() }
+            )
         default:
             throw TransportError.runtimeUnsupported(
                 uri: listenURI,
-                reason: "Serve.run(...) currently supports tcp:// and stdio:// only"
+                reason: "Serve.run(...) currently supports tcp://, stdio://, and mem:// only"
             )
         }
     }
